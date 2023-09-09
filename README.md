@@ -1,1 +1,3 @@
-# bundle-adjustment
+# Bundle Adjustment
+
+just for fun :)
