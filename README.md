@@ -18,7 +18,7 @@ Camera **extrinsics** describe the relative pose (position and orientation in 3D
 ### Python
 After importing and organizing the data from the GRAIL lab, functions to rotate, translate, project, and distort the data points from each camera are defined. Next, a cost function is defined that takes the estimated locations of points in the 3D world, rotates, translates, projects, and distorts them with estimated camera parameters, and calculates the difference between the resulting location of the point in the camera frame with the observed point in the camera frame, also known as the **reprojection error**.
 
-Finally, the sparsity of the syste is exploited. The solver needs to find relationships in a very large matrix (`total number of observations` x `total number of camera parameters`), but only a few of these relationships matter. For example, the parameters for camera `n` are related to the observations from camera `n` and no other cameras. This sparsity can be defined using `lil_matrix` from `scipy.sparse`, and added into the evaluation via the `jac_sparsity` argument. Running the optimization using `least squares` converges in less than a minute.
+Finally, the sparsity of the system is exploited. The solver needs to find relationships in a very large matrix (`total number of observations` x `total number of camera parameters`), but only a few of these relationships matter. For example, the parameters for camera `n` are related to the observations from camera `n` and no other cameras. This sparsity can be defined using `lil_matrix` from `scipy.sparse`, and added into the evaluation via the `jac_sparsity` argument. Running the optimization using `least squares` converges in less than a minute.
 
 For evaluation, the mean reprojection error can be calculated over each point observed by each camera. Typically a sub-pixel (< 1 pixel) reprojection error is considered "good".
 
@@ -26,3 +26,10 @@ Lastly, the observed points and the reprojected points from one camera can be pl
 ![Camera 18 reprojected points](camera_18.png)
 
 ### C++
+To run:
+```
+cd build
+cmake ..
+make
+./bundle_adjustment
+```
