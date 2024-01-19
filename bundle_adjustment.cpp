@@ -1,125 +1,231 @@
-#include <iostream>
-#include <fstream>
-#include <sstream>
-#include <vector>
-#include <string>
 #include <ceres/ceres.h>
 #include <Eigen/Core>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+#include <stdexcept>
+#include <string>
 #include <typeinfo>
-
-// template <typename T>Eigen::Matrix<T, 2, 1> project_distort_points(const Eigen::Matrix<T, 4, 1> projection, const Eigen::Matrix<T, 4, 1> distortion, const T* landmark) { /* Take 3d (x,y,z) points in the camera frame and project and disort them into 2d (u,v) distorted image points in the camera frame, using the inputted projection and distortion parameters */
-//     // Unpack camera intrinsics: projection and distortion parameters T fx = projection[0]; // Focal length x T fy = projection[1]; // Focal length y T cx = projection[2]; // Principal point x T cy = projection[3]; // Principal point y
-//     T k1 = distortion[0]; T k2 = distortion[1]; T k3 = distortion[2]; T k4 = distortion[3];
-    
-//     // Unpack 3d observed points 
-//     T x = landmark[0]; 
-//     T y = landmark[1]; 
-//     T z = landmark[2];
-
-//     // Project and distort the landmark points into the distorted image space 
-//     T r = ceres::sqrt(x * x + y * y); 
-//     T th = ceres::atan2(r, z);
-//     T th2 = th * th; 
-//     T th4 = th2 * th2; 
-//     T th6 = th4 * th2; 
-//     T th8 = th4 * th4; // th^8 
-//     T thd = th * (T(1) + k1 * th2 + k2 * th4 + k3 * th6 + k4 * th8);
-    
-//     T x_distorted = fx * (thd / r) * x + cx; 
-//     T y_distorted = fy * (thd / r) * y + cy;
-
-//     return Eigen::Matrix<T, 2, 1>(x_distorted, y_distorted);
-//     }
+#include <vector>
 
 
-// struct CostFunction {
-//     /* This cost function seeks to minimize the difference between the observed 2D points in the observed image frame,
-//     and the 3D points transforme, projected and distorted into the observed image frame. */
+struct Data {
+    int num_cameras;
+    int num_points;
+    int num_observations;
+    Eigen::VectorXi camera_inds;
+    Eigen::VectorXi point_inds;
+    Eigen::MatrixXd points_uv;
+    Eigen::VectorXd camera_params;
+    Eigen::VectorXd points_xyz;
+};
 
-//     CostFunction(const Eigen::Vector2d& points_uv_1, double& focal_length, Eigen::Vector2d& distortion_coeffs) : 
-//         observation_(points_uv_1), focal_length_(focal_length), distortion_coeffs_(distortion_coeffs) {}
-//     template <typename T>
-//     bool operator()(const T* const landmark_xyz,       // 3d positions of points in landmark frame
-//                     const T* const translation_xyz,    // translation from observation frame to landmark frame
-//                     const T* const quaternion_wxyz,    // quaternion from observation frame to landmark frame
-//                     // const T* const focal_lengths,      // focal lengths (fx, fy)
-//                     // const T* const principal_centers,  // principal centers (cx, cy)
-//                     // const T* const distortion,         // distortion parameters (k1, k2, k3, k4)
-//                     T* residual) const {
-
-//     // Create a 4x4 transformation matrix from quaternion and translation
-//     Eigen::Quaternion<T> quaternion_xyzw(quaternion_wxyz[0], quaternion_wxyz[1], quaternion_wxyz[2], quaternion_wxyz[3]);
-//     Eigen::Matrix<T, 3, 1> xyz(translation_xyz[0], translation_xyz[1], translation_xyz[2]);
-//     Eigen::Matrix<T, 4, 4> G_cam_origin = Eigen::Matrix<T, 4, 4>::Identity();
-//     G_cam_origin.template block<3, 3>(0, 0) = quaternion_xyzw.toRotationMatrix();
-//     G_cam_origin.template block<3, 1>(0, 3) = xyz;
-
-//     // Project landmark position from landmark frame to observation frame
-//     Eigen::Matrix<T, 4, 1> proj_landmark_h = G_cam_origin * Eigen::Matrix<T, 4, 1>(landmark_xyz[0], landmark_xyz[1], landmark_xyz[2], T(1.0));
-//     Eigen::Matrix<T, 3, 1> proj_landmark(proj_landmark_h[0], proj_landmark_h[1], proj_landmark_h[2]);
-
-//     // Change variable format
-//     Eigen::Matrix<T, 4, 1> projection_mat(focal_lengths_(0), focal_lengths_(1), principal_centers_(0), principal_centers_(1));
-//     Eigen::Matrix<T, 4, 1> distortion_mat(distortion_(0), distortion_(1), distortion_(2), distortion_(3));
-
-//     Eigen::Matrix<T, 2, 1> projection_uv = project_distort_points(projection_mat, distortion_mat, proj_landmark.data());
-
-//     // Compare in the distorted image space
-//     residual[0] = projection_uv(0) - observation_(0);
-//     residual[1] = projection_uv(1) - observation_(1);
-
-//     return true;
-//     }
-
-//     const Eigen::Vector2d observation_;
-//     const double focal_length_;
-//     const Eigen::Vector2d distortion_coeffs_;
-
-// };
-
-
-int main() {
-    // File URL and name (assuming the dataset is already downloaded)
-    std::string project_url = "http://grail.cs.washington.edu/projects/bal/data/ladybug/";
-    std::string dataset_name = "problem-73-11032-pre.txt.bz2";
-    std::string full_url = project_url + dataset_name;
+Data read_data(const std::string& dataset_name) {
+    /* 
+    camera_ind: (num_observations,) 
+        indices of cameras (from 0 to num_cameras - 1) involved in each observation.
+    point_ind: (num_observations,) 
+        indices of points (from 0 to num_points - 1) involved in each observation.
+    points_uv: (num_observations, 2) 
+        observed 2D coordinates (u, v) in the image frame for each observations.
+    camera_params: (num_cameras, 9) 
+        initial estimates of all camera parameters:
+            [0, 1, 2] a (Rodrigues) rotation vector 
+            [3, 4, 5] a translation vector
+            [6, 7, 8] a focal distance and two distortion parameters   
+    points_xyz: (num_points, 3)
+        initial estimates of 3D point coordinates (x, y, z) in the world frame.
+    */
 
     // Read data from file
     std::ifstream file(dataset_name);
 
     if (!file.is_open()) {
-        std::cerr << "Error opening file." << std::endl;
-        return 1;
+        throw std::runtime_error("Error opening file: " + dataset_name);    
     }
 
-    int num_cameras, num_points, num_observations;
-    file >> num_cameras >> num_points >> num_observations;
+    Data data;
+    file >> data.num_cameras >> data.num_points >> data.num_observations;
 
-    std::cout << "num_cameras: " << num_cameras << std::endl;
-    std::cout << "num_points: " << num_points << std::endl;
-    std::cout << "num_observations: " << num_observations << std::endl;
+    std::cout << "num_cameras: " << data.num_cameras << std::endl;
+    std::cout << "num_points: " << data.num_points << std::endl;
+    std::cout << "num_observations: " << data.num_observations << std::endl;
 
-    std::vector<int> camera_inds(num_observations);
-    std::vector<int> point_inds(num_observations);
-    std::vector<std::vector<float> > points_uv(num_observations, std::vector<float>(2));
+    // Resize Eigen structures
+    data.camera_inds.resize(data.num_observations);
+    data.point_inds.resize(data.num_observations);
+    data.points_uv.resize(data.num_observations, 2);
+    data.camera_params.resize(data.num_cameras * 9);
+    data.points_xyz.resize(data.num_points * 3);
 
-    for (int i = 0; i < num_observations; ++i) {
-        file >> camera_inds[i] >> point_inds[i] >> points_uv[i][0] >> points_uv[i][1];
+    // Read and assign data
+    for (int i = 0; i < data.num_observations; ++i) {
+        file >> data.camera_inds[i] >> data.point_inds[i] >> data.points_uv(i,0) >> data.points_uv(i,1);
     }
 
-    std::vector<float> camera_params(num_cameras * 9);
-    for (int i = 0; i < num_cameras * 9; ++i) {
-        file >> camera_params[i];
+    for (int i = 0; i < data.num_cameras * 9; ++i) {
+        file >> data.camera_params[i];
     }
 
-    std::vector<float> points_xyz(num_points * 3);
-    for (int i = 0; i < num_points * 3; ++i) {
-        file >> points_xyz[i];
+    for (int i = 0; i < data.num_points * 3; ++i) {
+        file >> data.points_xyz[i];
     }
+
+    file.close();
+    return data;
+}
+
+template <typename T>Eigen::Matrix<T, 3, 1> rotate_point(const Eigen::Matrix<T, 3, 1> point_xyz, const Eigen::Matrix<T, 3, 1> rotation_vec) 
+{    //Rotate 3D points by the estimated rotation vectors. """
+
+    T theta = rotation_vec.norm();
+
+    Eigen::Matrix<T, 3, 1> k;
+    if (theta != 0.0) {
+        k = rotation_vec / theta;
+    } else {
+        k = Eigen::Matrix<T, 3, 1> (T(0.0), T(0.0), T(0.0));
+    }
+
+    T dot = point_xyz.dot(k);
+    T cos_theta = ceres::cos(theta);
+    T sin_theta = ceres::sin(theta);
+    Eigen::Matrix<T, 3, 1> rotated_point = point_xyz * cos_theta +
+                                            k.cross(point_xyz) * sin_theta +
+                                            k * dot * (T(1) - cos_theta);
+
+    return rotated_point;
+}
+
+
+template <typename T>Eigen::Matrix<T, 2, 1> project_distort_point(const Eigen::Matrix<T, 3, 1> point_xyz, const Eigen::Matrix<T, 9, 1> camera_params) 
+{ 
+    /* Take 3d (x,y,z) points in the camera frame and project and disort them into 2d (u,v) distorted image points in the camera frame, using the inputted camera parameters */
+    
+    // Unpack camera params
+    Eigen::Matrix<T, 3, 1> rotation_vec = camera_params.template segment<3>(0);
+    Eigen::Matrix<T, 3, 1> translation_vec = camera_params.template segment<3>(3);
+    T f = camera_params(6);
+    T k1 = camera_params(7);
+    T k2 = camera_params(8);
+
+    // Project points onto 2D image plane
+    Eigen::Matrix<T, 3, 1> point_proj = rotate_point(point_xyz, rotation_vec); // rotate_points needs to be implemented
+    point_proj += translation_vec;
+    point_proj(0) = -point_proj(0) / point_proj(2);
+    point_proj(1) = -point_proj(1) / point_proj(2);
+
+    // Distort points
+    T n = point_proj.squaredNorm();
+    T r = T(1) + k1 * n + k2 * n * n;
+    Eigen::Matrix<T, 2, 1> point_2d;
+    point_2d(0) = point_proj(0) * r * f;
+    point_2d(1) = point_proj(1) * r * f;
+
+    return point_2d;
+}
+
+
+struct CostFun {
+    /* This cost function seeks to minimize the difference between the observed 2D points in the observed image frame,
+    and the 3D points transforme, projected and distorted into the observed image frame. */
+
+    CostFun(const Eigen::Vector2d& point_uv) :  observation_(point_uv) {}
+    template <typename T>
+    bool operator()(const T* const point_xyz,  // 3D positions of point in camera frame
+                    const T* const camera,     // camera parameters
+                    T* residual) const {
+
+    // Convert pointers to Eigen matrices
+    Eigen::Matrix<T, 3, 1> point(point_xyz[0], point_xyz[1], point_xyz[2]);
+    Eigen::Matrix<T, 9, 1> camera_params;
+    for (int i = 0; i < 9; ++i) {
+        camera_params[i] = camera[i];
+    }
+
+    // Project point position from camera frame to world frame
+    Eigen::Matrix<T, 2, 1> projection_uv = project_distort_point(point, camera_params);
+
+    // Compare observed and projected point
+    residual[0] = projection_uv(0) - observation_(0);
+    residual[1] = projection_uv(1) - observation_(1);
+
+    return true;
+    }
+    const Eigen::Vector2d observation_;
+};
+
+
+int main() {
+    // Dataset name (assuming the dataset is already downloaded)
+    std::string dataset_name = "../problem-73-11032-pre.txt";
+
+    // Read data from file
+    Data data = read_data(dataset_name);
 
     // Set up optimization problem
     ceres::Problem problem;
 
+    // Define loss function 
+    ceres::LossFunction* loss = new ceres::HuberLoss(1.0); // this value could be tuned
+
+    // For each observation 
+    for (int obs_num = 0; obs_num < data.num_observations; obs_num++) {
+
+        // Get the camera and point indices for this observation
+        int camera_index = data.camera_inds[obs_num];
+        int point_index = data.point_inds[obs_num];
+
+        Eigen::Vector2d point_uv = data.points_uv.row(obs_num);
+        // std::vector<double> point_uv = data.points_uv[obs_num]; // observed, distorted 2D point in camera frame
+
+        // Get pointers to the camera parameters and 3D point
+        double* camera = &data.camera_params[camera_index * 9];  // camera parameters for this camera
+        double* point_xyz = &data.points_xyz[point_index * 3];  // 3D location of the observed point
+        problem.AddParameterBlock(camera, 9); 
+        problem.AddParameterBlock(point_xyz, 3); 
+
+        // Cost function to compare observed and projected/distorted points in the same frame
+        ceres::CostFunction* cost_function = new ceres::AutoDiffCostFunction<CostFun,
+                                                                            2,  // residual size
+                                                                            3,  // 3d location of points
+                                                                            9  // camera parameters
+                                                                            >(new CostFun(point_uv));
+
+        problem.AddResidualBlock(cost_function, loss, point_xyz, camera);
+    }
+
+   
+    // Set up solver options 
+    ceres::Solver::Options options; 
+    ceres::Solver::Summary summary;
+    bool print_progress = false; 
+    options.max_num_iterations = 2500; 
+    options.linear_solver_type = ceres::SPARSE_SCHUR; 
+    options.minimizer_progress_to_stdout = print_progress;
+    options.gradient_tolerance = 1e-10; 
+    options.parameter_tolerance = 1e-8; 
+    options.function_tolerance = 1e-7;
+
+    // Run the optimization 
+    ceres::Solve(options, &problem, &summary);
+
+    // Print results
+    if (summary.IsSolutionUsable()) { 
+        // Print initial cost 
+        double average_reprojection_error_0 = summary.initial_cost / summary.num_residuals; 
+        std::cout << "Initial cost: " << summary.initial_cost << std::endl; 
+        std::cout << " Average initial cost / num residuals: " << average_reprojection_error_0 << std::endl;
+
+        //  Print final cost 
+        double average_reprojection_error = summary.final_cost / summary.num_residuals; 
+        std::cout << "Final cost: " << summary.final_cost << std::endl; 
+        std::cout << " Average final cost / num residuals: " << average_reprojection_error << std::endl;
+        std::cout << summary.FullReport() << std::endl;
+    } else { 
+        std::cout << "Optimization failed." << std::endl; 
+        std::cout << summary.FullReport() << std::endl; 
+    }
 
     return 0;
 }
